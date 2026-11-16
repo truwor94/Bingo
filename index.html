@@ -689,8 +689,12 @@ function broadcastState(){
 function setupHost(){
   var code=Math.random().toString(36).slice(2,8).toUpperCase();
   S.roomCode=code;S.isHost=true;S.memDb=makeMemoryDb();S.db=S.memDb;S.myKey='host-'+code;
+  // Der Host verarbeitet lokale Datenänderungen genauso wie ein beigetretener Spieler.
+  function makeSnap(obj){return {docs:Object.keys(obj).map(function(id){var v=obj[id];return {id:id,exists:true,data:function(){return v}}}),metadata:{fromCache:false}}}
+  S.memDb.collection('game').onSnapshot(function(snap){onGame(snap);broadcastState()});
+  S.memDb.collection('tiles').onSnapshot(function(snap){onTiles(snap);broadcastState()});
   var peer=new Peer('bingo-'+code);S.peer=peer;
-  peer.on('open',function(){S.err=null;S.memDb.collection('game').onSnapshot(function(){broadcastState()});S.memDb.collection('tiles').onSnapshot(function(){broadcastState()});render()});
+  peer.on('open',function(){S.err=null;render()});
   peer.on('connection',function(conn){
     conn.on('open',function(){S.connections.push(conn);conn.send({type:'sync',data:S.memDb._dump()})});
     conn.on('data',function(m){
@@ -707,8 +711,6 @@ function setupHost(){
     conn.on('close',function(){S.connections=S.connections.filter(function(x){return x!==conn})});
   });
   peer.on('error',function(e){S.err='Peer-Verbindung fehlgeschlagen: '+(e.type||e.message||'unbekannter Fehler');render()});
-  S.memDb.collection('game').onSnapshot(function(){broadcastState()});
-  S.memDb.collection('tiles').onSnapshot(function(){broadcastState()});
   render();
 }
 function remoteDb(conn){
