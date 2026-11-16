@@ -91,6 +91,7 @@ button,input,textarea{font:inherit;color:inherit}
 .stepper button[disabled]{opacity:.35;cursor:not-allowed}
 .stepper output{min-width:44px;text-align:center;font-family:var(--f-display);font-weight:800;font-size:20px}
 
+.room-code{font-family:var(--f-display);font-size:28px;font-weight:800;letter-spacing:.12em;text-align:center;padding:12px;background:var(--surface2);border-radius:12px;user-select:all}.room-actions{display:flex;gap:8px;flex-wrap:wrap}.room-actions>*{flex:1;min-width:130px}
 /* Lobby */
 .slots{display:grid;grid-template-columns:1fr;gap:14px}
 @media(min-width:620px){.slots{grid-template-columns:1fr 1fr}}
@@ -161,6 +162,7 @@ label.lbl{font-size:13px;font-weight:600;color:var(--muted)}
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 <canvas id="confetti" aria-hidden="true"></canvas>
 
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
 (function(){
 'use strict';
@@ -199,7 +201,7 @@ var S={db:null,noDb:false,err:null,canWrite:null,myKey:null,
   cfg:Object.assign({},DEF,{order:IDS.slice()}),cfgExists:false,p:{p1:null,p2:null},tiles:{},
   gameLive:false,tilesLive:false,slow:false,slowTimer:null,
   titleDraft:null,names:{p1:null,p2:null},pick:{p1:'blau',p2:'orange'},
-  confirm:null,busy:null,sheet:null,seen:null,imgCache:{},finishing:false,timers:{}};
+  confirm:null,busy:null,sheet:null,seen:null,imgCache:{},finishing:false,timers:{},roomCode:null,peer:null,connections:[],rpcSeq:0,rpcWait:{},isHost:false,memDb:null,conn:null,remoteGame:{},remoteTiles:{},remoteListeners:[]};
 function loaded(){return S.gameLive&&S.tilesLive}
 function canW(){return S.canWrite!==false&&!S.noDb}
 
@@ -316,13 +318,13 @@ function render(){
   var app=$('#app'),fa=document.activeElement,keep=null;
   if(fa&&app.contains(fa)&&fa.id&&/^(INPUT|TEXTAREA)$/.test(fa.tagName))keep={id:fa.id,s:fa.selectionStart,e:fa.selectionEnd};
   var st=S.cfg.status,body='';
-  if(S.noDb)body='<div class="notice err">Der gemeinsame Speicher ist hier nicht verfügbar. Öffne das Bingo über den Claude-Link mit Zugriff als Mitwirkender.</div>';
+  if(!S.db)body=viewConnect();
   else if(st==='setup')body=viewSetup();
   else if(st==='lobby')body=viewLobby();
   else if(st==='playing')body=viewPlay();
   else body=viewFinished();
   app.className='wrap'+(S.busy?' is-busy':'');
-  app.innerHTML=header()+(S.err?'<div class="notice err">'+(S.err==='revoked'?'Dein Zugriff wurde beendet.':'Die Live-Verbindung ist abgebrochen. Lade die Seite neu.')+'</div>':'')
+  app.innerHTML=header()+(S.db&&S.roomCode?'<div class="card"><div class="row between"><strong>Raum-Code</strong><button class="btn ghost sm" data-act="copyRoom">Kopieren</button></div><div class="room-code">'+esc(S.roomCode)+'</div><p class="muted small">Teile diesen Code mit deinem Mitspieler.</p></div>':'')+(S.err?'<div class="notice err">'+(S.err==='revoked'?'Dein Zugriff wurde beendet.':'Die Live-Verbindung ist abgebrochen. Lade die Seite neu.')+'</div>':'')
     +((!S.noDb&&S.canWrite===false)?'<div class="notice">Du hast nur Lesezugriff. Zum Mitspielen brauchst du Zugriff als Mitwirkender.</div>':'')+body;
   if(keep){var el=document.getElementById(keep.id);if(el){el.focus();try{el.setSelectionRange(keep.s,keep.e)}catch(e){}}}
   var seen={};IDS.forEach(function(id){seen[id]=tile(id).by});S.seen=seen;
@@ -330,7 +332,7 @@ function render(){
 function header(){
   var st=S.cfg.status,title=S.titleDraft!==null?S.titleDraft:S.cfg.title;
   var t=(st==='setup'&&canW())?'<input id="title-input" class="title-input" value="'+esc(title)+'" maxlength="40" aria-label="Titel des Bingos">':'<h1>'+esc(S.cfg.title)+'</h1>';
-  var live=loaded(),label=live?'Live':(S.slow?'Keine Verbindung':'Verbindet …');
+  var live=!!S.db&&loaded(),label=!S.db?'Nicht verbunden':(live?'Live':(S.slow?'Keine Verbindung':'Verbindet …'));
   var names=['Board','Lobby','Spiel','Ergebnis'],keys=['setup','lobby','playing','finished'],ix=keys.indexOf(st);
   var steps=names.map(function(n,i){return '<li class="'+(i===ix?'now':i<ix?'past':'')+'"'+(i===ix?' aria-current="step"':'')+'>'+n+'</li>'}).join('');
   return '<header class="top">'+t+'<span class="pill'+(live?' live':'')+'"><i></i>'+label+'</span></header><ol class="steps" aria-label="Spielphase">'+steps+'</ol>';
@@ -350,6 +352,14 @@ function tileHtml(pos,mode){
 }
 function boardHtml(mode){var h='';for(var i=0;i<25;i++)h+=tileHtml(i,mode);return '<div class="board" role="group" aria-label="Bingo-Board">'+h+'</div>'}
 
+function viewConnect(){
+  return '<section class="card"><h2>Multiplayer verbinden</h2><p class="lead-text">Ein Gerät erstellt einen Raum. Das zweite Gerät tritt mit dem kurzen Raum-Code bei. Das Spiel wird direkt per WebRTC übertragen – ohne Claude-Speicher und ohne Server-Anmeldung.</p>'
+    +'<button class="btn block" data-act="createRoom">Raum erstellen</button>'
+    +'<div><label class="lbl" for="room-code-input">Vorhandenen Raum-Code eingeben</label><input class="field" id="room-code-input" maxlength="6" autocomplete="off" autocapitalize="characters" placeholder="z. B. A7K9PQ"></div>'
+    +'<button class="btn ghost block" data-act="joinRoom">Raum beitreten</button>'
+    +(S.err?'<p class="notice err">'+esc(S.err)+'</p>':'')
+    +'<p class="muted small">Für die Verbindung wird PeerJS als Signalisierungsdienst und WebRTC für die direkte Datenübertragung verwendet. Beide Geräte müssen online sein.</p></section>';
+}
 function viewSetup(){
   var n=filled(),b=bonusCount(),bp=S.cfg.bonusPoints,w=canW(),done=n===25;
   var tools;
@@ -643,31 +653,99 @@ function confetti(){
   requestAnimationFrame(f);
 }
 
-/* ---------- Start ---------- */
-async function initIdentity(){
-  var u=null,uid=null,key=null;
-  try{u=await window.claude.use('user')}catch(e){}
-  if(u){try{uid=await u.id()}catch(e){}try{S.canWrite=await u.can('data.write')}catch(e){}}
-  try{key=localStorage.getItem('bingo-device')}catch(e){}
-  if(!key){
-    key='d'+Math.random().toString(36).slice(2,10)+Date.now().toString(36);
-    try{localStorage.setItem('bingo-device',key)}catch(e){}
+/* ---------- PeerJS Multiplayer: flüchtiger Raum ohne Claude-Storage ---------- */
+function makeMemoryDb(){
+  var docs={game:{},tiles:{},images:{}},listeners=[];
+  function clone(v){return JSON.parse(JSON.stringify(v))}
+  function emit(){
+    listeners.forEach(function(l){
+      var arr=Object.keys(docs[l.name]||{}).map(function(id){return {id:id,exists:true,data:function(){return clone(docs[l.name][id])}}});
+      l.cb({docs:arr,metadata:{fromCache:false}});
+    });
   }
-  S.myKey=key;
+  function doc(path){
+    var parts=path.split('/'),col=parts[0],id=parts[1];
+    return {
+      get:async function(){var d=docs[col][id];return {exists:!!d,data:function(){return d?clone(d):null}}},
+      set:async function(v){docs[col][id]=clone(v);emit()},
+      update:async function(v){if(!docs[col][id])throw new Error('Dokument fehlt');Object.assign(docs[col][id],clone(v));emit()},
+      delete:async function(){delete docs[col][id];emit()},
+      acquire:async function(){return {acquired:true}}
+    };
+  }
+  return {doc:doc,collection:function(name){return {onSnapshot:function(cb){listeners.push({name:name,cb:cb});emit()}}},_dump:function(){return clone(docs)},_load:function(v){docs=v||{game:{},tiles:{},images:{}};emit()},_docs:docs};
 }
-async function init(){
-  render();
-  var cl=window.claude;
-  if(!cl||!cl.use){S.noDb=true;render();return}
-  var db=null;
-  try{var r=await Promise.all([cl.use('db'),initIdentity()]);db=r[0]}catch(e){}
-  if(!db){S.noDb=true;render();return}
-  S.db=db;
-  S.slowTimer=setTimeout(function(){if(!loaded()){S.slow=true;render()}},10000);
-  db.collection('game').onSnapshot(onGame,onErr);
-  db.collection('tiles').onSnapshot(onTiles,onErr);
+function applySnapshot(data){
+  if(!S.db||!data)return;
+  var gd=data.game||{},td=data.tiles||{};S.remoteGame=gd;S.remoteTiles=td;
+  function snap(obj){return {docs:Object.keys(obj).map(function(id){var v=obj[id];return {id:id,exists:true,data:function(){return v}}}),metadata:{fromCache:false}}}
+  onGame(snap(gd));onTiles(snap(td));
+}
+function broadcastState(){
+  if(!S.isHost||!S.memDb)return;
+  var msg={type:'sync',data:S.memDb._dump()};
+  S.connections=S.connections.filter(function(c){if(!c.open)return false;try{c.send(msg);return true}catch(e){return false}});
+}
+function setupHost(){
+  var code=Math.random().toString(36).slice(2,8).toUpperCase();
+  S.roomCode=code;S.isHost=true;S.memDb=makeMemoryDb();S.db=S.memDb;S.myKey='host-'+code;
+  var peer=new Peer('bingo-'+code);S.peer=peer;
+  peer.on('open',function(){S.err=null;S.memDb.collection('game').onSnapshot(function(){broadcastState()});S.memDb.collection('tiles').onSnapshot(function(){broadcastState()});render()});
+  peer.on('connection',function(conn){
+    conn.on('open',function(){S.connections.push(conn);conn.send({type:'sync',data:S.memDb._dump()})});
+    conn.on('data',function(m){
+      if(!m||m.type!=='rpc')return;
+      try{
+        var result;
+        if(m.op==='get'){var v=S.memDb._dump()[m.col][m.id];result={exists:!!v,data:v||null}}
+        else if(m.op==='set')result=S.db.doc(m.col+'/'+m.id).set(m.value);
+        else if(m.op==='update')result=S.db.doc(m.col+'/'+m.id).update(m.value);
+        else if(m.op==='delete')result=S.db.doc(m.col+'/'+m.id).delete();
+        Promise.resolve(result).then(function(v){conn.send({type:'reply',id:m.idn,result:v||null})}).catch(function(e){conn.send({type:'reply',id:m.idn,error:e.message})});
+      }catch(e){conn.send({type:'reply',id:m.idn,error:e.message})}
+    });
+    conn.on('close',function(){S.connections=S.connections.filter(function(x){return x!==conn})});
+  });
+  peer.on('error',function(e){S.err='Peer-Verbindung fehlgeschlagen: '+(e.type||e.message||'unbekannter Fehler');render()});
+  S.memDb.collection('game').onSnapshot(function(){broadcastState()});
+  S.memDb.collection('tiles').onSnapshot(function(){broadcastState()});
   render();
 }
+function remoteDb(conn){
+  conn.on('data',function(m){
+    if(m.type==='sync'){applySnapshot(m.data);return}
+    if(m.type==='reply'){var w=S.rpcWait[m.id];if(w){delete S.rpcWait[m.id];if(m.error)w.reject(new Error(m.error));else w.resolve(m.result)}}
+  });
+  function call(op,col,id,value){
+    return new Promise(function(resolve,reject){
+      var n=++S.rpcSeq;S.rpcWait[n]={resolve:resolve,reject:reject};
+      try{conn.send({type:'rpc',op:op,col:col,id:id,idn:n,value:value})}catch(e){delete S.rpcWait[n];reject(e)}
+    });
+  }
+  return {doc:function(path){var a=path.split('/'),c=a[0],id=a[1];return {
+    get:async function(){var v=await call('get',c,id);return {exists:v.exists,data:function(){return v.data}}},
+    set:function(v){return call('set',c,id,v)},update:function(v){return call('update',c,id,v)},delete:function(){return call('delete',c,id)},
+    acquire:async function(){return {acquired:true}}
+  }},collection:function(name){return {onSnapshot:function(cb){var fn=function(){var d=name==='game'?S.remoteGame||{}:S.remoteTiles||{};cb({docs:Object.keys(d).map(function(id){return {id:id,exists:true,data:function(){return d[id]}}}),metadata:{fromCache:false}})};S.remoteListeners=S.remoteListeners||[];S.remoteListeners.push({name:name,cb:fn});fn()}}}};
+}
+function joinRemote(code){
+  if(!window.Peer){S.err='PeerJS konnte nicht geladen werden. Bitte Seite neu laden.';render();return}
+  var peer=new Peer();S.peer=peer;S.roomCode=code;
+  peer.on('open',function(){var conn=peer.connect('bingo-'+code,{reliable:true});S.conn=conn;
+    conn.on('open',function(){S.db=remoteDb(conn);S.isHost=false;S.myKey='guest-'+Math.random().toString(36).slice(2);S.remoteGame={};S.remoteTiles={};render()});
+    conn.on('error',function(){S.err='Raum nicht erreichbar. Prüfe den Code und versuche es erneut.';S.db=null;render()});
+    conn.on('close',function(){S.err='Die Verbindung zum Host wurde getrennt.';S.db=null;render()});
+    conn.on('data',function(m){if(m.type==='sync'){S.remoteGame=m.data.game||{};S.remoteTiles=m.data.tiles||{};(S.remoteListeners||[]).forEach(function(x){x.cb()});}});
+  });
+  peer.on('error',function(e){S.err='Verbindung fehlgeschlagen: '+(e.type||'Raum nicht gefunden');S.db=null;render()});
+}
+var oldDbDoc=null;
+async function init(){render()}
+var oldRender=render;
+var oldH=H;
+H.createRoom=function(){if(S.peer){try{S.peer.destroy()}catch(e){}}setupHost()};
+H.joinRoom=function(){var el=$('#room-code-input'),code=(el?el.value:'').trim().toUpperCase();if(!/^[A-Z0-9]{6}$/.test(code)){toast('Bitte einen sechsstelligen Raum-Code eingeben.');return}joinRemote(code)};
+H.copyRoom=function(){if(S.roomCode&&navigator.clipboard)navigator.clipboard.writeText(S.roomCode).then(function(){toast('Raum-Code kopiert.')}).catch(function(){toast('Code: '+S.roomCode)})};
 init();
 })();
 </script>
